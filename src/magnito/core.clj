@@ -1,136 +1,246 @@
 (ns magnito.core
   (:require
-   [clojure.string :as str]
-   [honeysql.format :as honeysql-format]))
+   [honeysql.core :as honeysql]
+   [honeysql.helpers :as honeysql-helpers]
+   [magnito.resource :as resource]
+   [magnito.utils :as utils]
+   [honeysql.core :as honeysql]
+   [clojure.string :as str]))
 
-(defmethod honeysql-format/fn-handler "json-op"
-  [_ op]
-  (let [op (if (vector? op) op [op])]
-    (reduce
-     (fn [acc item]
-       (let [v
-             (cond
-               (keyword? item) (name item)
-               (string? item) (str "'" item "'")
-               :else item)]
-         (str acc v)))
-     ""
-     op)))
+(defn- build-left-join-condition
+  [cte-path {:keys [by collection? id joint reverse?] :or {joint :resource}}]
+  (let [parent-ref-key
+        (-> cte-path
+            (utils/shrink-cte-path)
+            (utils/cte-path->ref-key))
+        t1-part
+        (if reverse?
+          [parent-ref-key [id] :t1]
+          [parent-ref-key by :t1])
+        t2-part
+        (if reverse?
+          ;; [joint by :t2]
+          (if collection? [joint (into [0] by) :t2] [joint by :t2])
+          [joint [id] :t2])]
+    [:=
+     (apply utils/build-sql-json-path-extractor-call t1-part)
+     (apply utils/build-sql-json-path-extractor-call t2-part)]))
 
-(def q1
-  {:where [:= [:json-op [:resource :-> "profile" :->> "id"]] 18]})
+(defn- process-resource-build-cte-part
+  [{:keys [cte-path] :as acc} {:keys [by id root?] reverse? :reverse :as resource}]
+  (let [ref-key (utils/cte-path->ref-key cte-path)
+        cte-body
+        (if root?
+          (-> {}
+              (honeysql-helpers/select [:t1.resource ref-key])
+              (honeysql-helpers/from [(-> resource (:resourceType) (keyword)) :t1]))
+          (let [parent-cte-path (utils/shrink-cte-path cte-path)
+                parent-cte-name (utils/to-cte-name parent-cte-path)]
+            (-> {}
+                (honeysql-helpers/select [:t2.resource ref-key])
+                (honeysql-helpers/from [(keyword parent-cte-name) :t1])
+                (honeysql-helpers/left-join
+                 [(keyword (:resourceType resource)) :t2]
+                 (build-left-join-condition
+                  cte-path
+                  {:by by
+                   :id id
+                   :reverse? reverse?})))))]
+    (update acc :sql-ctes conj [(-> cte-path (utils/to-cte-name) (keyword)) cte-body])))
 
-(honeysql-format/format q1)
+(defn- build-query-part-add-from
+  [m cte-path]
+  (honeysql-helpers/from m [(keyword (utils/to-cte-name cte-path)) :t1]))
 
-(def q2
-  {:where [:= [:json-op :#>>] 18]})
+(defn- build-query-part-add-left-join
+  [m cte-path sql-query joint-key {:keys [by id] :as ref-resource}]
+  (let [{collection? :collection reverse? :reverse} ref-resource
+        child-cte-path (utils/expand-cte-path cte-path joint-key)
+        t2 (or sql-query
+               (-> child-cte-path (utils/to-cte-name) (keyword)))]
+    (honeysql-helpers/left-join
+     m
+     [t2 :t2]
+     (build-left-join-condition
+      child-cte-path
+      {:by by
+       :collection? collection?
+       :id id
+       :joint joint-key
+       :reverse? reverse?}))))
 
-(honeysql-format/format q2)
+(defn- build-query-part-add-select
+  [m cte-path joint-key {:keys [collection] :as ref-resource}]
+  (let [json-joint
+        (-> joint-key
+            (name)
+            (#(str "{" % "}"))
+            (utils/to-json-path-segment))
+        new-joint-key (last cte-path)
+        trg (honeysql/qualify :t1 new-joint-key)
+        src (honeysql/qualify :t2 joint-key)]
+    (honeysql-helpers/select
+     m
+     [(honeysql/call
+       :case
+       [:= (honeysql/qualify :t2 joint-key) nil] trg
+       :else (honeysql/call :jsonb_set trg json-joint src))
+      new-joint-key])))
 
-(def query
-  {:resourceType "User"
-   :references
-   {:profile
-    {:resourceType "Profile"
-     :elements [:name]}
-    :posts
-    {:resourceType "Post"
-     :reverse true
-     :collection true
-     :by [:author :id]
-     :elements [:title] ;; pick only required attributes
-     :references
-     {:comments
-      {:resourceType "Comment"
-       :by [:post :id]
-       :collection true
-       :reverse true
-       :references
-       {:author
-        {:resourceType "User"}}}}}}})
+(defn- build-query-part-aggregate-collection-resource
+  [cte-path-or-sql-query joint-key {:keys [by] :as ref-resource}]
+  (let [qualified-joint-key (honeysql/qualify :t1 joint-key)
+        json-field (utils/build-sql-json-path-extractor-call qualified-joint-key by)
+        t1
+        (if (map? cte-path-or-sql-query)
+          cte-path-or-sql-query
+          (-> cte-path-or-sql-query
+              (utils/expand-cte-path joint-key)
+              (utils/to-cte-name)
+              (keyword)))]
+    (-> {}
+        (honeysql-helpers/select
+         [(honeysql/call :jsonb_agg qualified-joint-key) joint-key])
+        (honeysql-helpers/from [t1 :t1])
+        (honeysql-helpers/group json-field)
+        (honeysql-helpers/having [:is-not json-field nil]))))
 
-(def sql-map
-  {:with
-   [[:user {:select [:*] :from [:User]}]
-    [:user-ref-profile
-     {:select [#sql/call [:jsonb-extract-path-text "'profile'" "'id'"]]
-      :from [:Profile]}]]})
+(defn- build-query-part
+  [{:keys [cte-path sql-query] :as acc} resource]
+  ;; (println "build-query-part()" cte-path)
+  (->> resource
+       (:references)
+       (reduce
+        (fn [sql-query-acc [k v]]
+          (let [ref-cte-path (utils/expand-cte-path cte-path k)
+                ref-resource (resource/add-defaults v resource ref-cte-path)
+                ref-collection? (:collection ref-resource)
+                ;; In case of collection resource we must aggregate in separate
+                ;; step or otherwise resulting JSON would have arrays of nulls
+                ;; for parent resources that have no collection item(-s).
+                sql-query-acc
+                (if ref-collection?
+                  (build-query-part-aggregate-collection-resource
+                   (or sql-query-acc cte-path)   ; we can already have an SQL query built in previous step
+                   k
+                   ref-resource)
+                  sql-query-acc)]
+            (-> {}
+                (build-query-part-add-select cte-path k ref-resource)
+                (build-query-part-add-from cte-path)
+                (build-query-part-add-left-join
+                 cte-path
+                 (and ref-collection? sql-query-acc)
+                 k
+                 ref-resource))))
+        sql-query)
+       (#(if (:root? resource)
+           (-> {}
+               (honeysql-helpers/select [(honeysql/call :jsonb_agg :t1.root) :result])
+               (honeysql-helpers/from [% :t1]))
+           %))
+       (assoc acc :sql-query)))
 
-(honeysql-format/format sql-map)
+(defn- process-resource
+  [{:keys [cte-path parent-resource] :as acc} {:keys [root?] :as resource}]
+  (let [ref-key (utils/cte-path->ref-key cte-path)
+        resource
+        (-> resource
+            (resource/add-defaults parent-resource cte-path)
+            (resource/validate))]
+    (-> acc
+        (process-resource-build-cte-part resource)
+        ((fn [acc]
+           (reduce-kv
+            (fn [m k v]
+              (-> m
+                  (utils/expand-acc-cte-path k)
+                  (process-resource v)
+                  (utils/shrink-acc-cte-path)))
+            acc
+            (:references resource))))
+        (build-query-part resource))))
 
-(declare build-sql-cte)
-(declare build-sql-add-references-sql)
+(defn- process
+  [resource]
+  (let [acc
+        {:cte-path [:root]
+         :sql-ctes []
+         :sql-query nil}]
+    (->> (assoc resource :root? true)
+         (process-resource acc))))
 
-(defn- build-sql-add-resource-sql
-  [resource-map sql-map cte-key paths]
-  (println cte-key)
-  (let [paths (if (= "" cte-key) paths (assoc paths cte-key {}))
-        rel-key
-        (-> resource-map
-            (:resourceType)
-            (keyword))
-        cte-key
-        (->> rel-key
-             (name)
-             (#(if (= "" cte-key) % (str (name cte-key) "_" %)))
-             (str/lower-case)
-             (keyword))
-        sql-map (update sql-map :with conj [cte-key {:select [:*] :from [rel-key]}])]
-    (println "paths" paths)
-    (if-let [references (:references resource-map)]
-      (build-sql-add-references-sql references sql-map rel-key paths)
-      sql-map)))
+(defn resource->sql
+  ([resource] (resource->sql resource nil))
+  ([resource {:keys [str?]}]
+   (let [{:keys [sql-ctes sql-query]} (process resource)
+         sql-map (apply honeysql-helpers/with sql-query sql-ctes)
+         [x & xs :as sql-vec] (honeysql.format/format sql-map)]
+     (if str?
+       (-> x
+           (str/replace "?" "%s")
+           (#(apply format % xs)))
+       sql-vec))))
 
-(defn- build-sql-add-references-sql-forward
-  [reference-key resource-map sql-map cte-key paths]
-  (println "build-sql-add-references-sql-forward" reference-key resource-map cte-key paths)
-  (build-sql-cte resource-map sql-map cte-key paths))
+;; (println "\n\n-------------------------------------------------------------------------------")
+;; (let [{:keys [sql-ctes sql-query] :as acc}
+;;       (process
+;;        {:resourceType "Account"
+;;         :references
+;;         {
+;;          ;; :profile {:resourceType "Profile"}
+;;          :posts
+;;          {:resourceType "Post"
+;;           :by [:author :id]
+;;           :collection true
+;;           :reverse true
+;;           :references
+;;           {:commentaries
+;;            {:resourceType "Commentary"
+;;             :by [:post :id]
+;;             :collection true
+;;             :reverse true
+;;             :references {:author {:resourceType "Account"}}
+;;             }
+;;            }
+;;           }
+;;          }
+;;         })]
+;;   ;; (println "\n+++++++++\nacc")
+;;   ;; (clojure.pprint/pprint acc)
+;;   ;; (clojure.pprint/pprint sql-ctes)
+;;   (let [res (apply honeysql-helpers/with sql-query sql-ctes)]
+;;     ;; (clojure.pprint/pprint (honysql.format/format res))
+;;     (let [[x & xs] (honeysql.format/format res)]
+;;       (-> x
+;;           (str/replace "?" "%s")
+;;           (#(apply format % xs))
+;;           (clojure.pprint/pprint)))
+;;     )
+;;   )
 
-(defn- build-sql-add-references-sql-reverse
-  [reference-key resource-map sql-map cte-key paths]
-  (build-sql-cte resource-map sql-map cte-key paths))
-
-(defn- build-sql-add-references-sql
-  [references-map sql-map cte-key paths]
-  (reduce-kv
-   (fn [m k v]
-     (let [reverse? (:reverse v)]
-       (if reverse?
-         (build-sql-add-references-sql-reverse k v sql-map cte-key paths)
-         (build-sql-add-references-sql-forward k v sql-map cte-key paths))))
-   sql-map
-   references-map))
-
-(defn- build-sql-cte
-  ([resource-map]
-   (build-sql-cte resource-map {:with []}))
-  ([resource-map sql-map]
-   (build-sql-cte resource-map sql-map ""))
-  ([resource-map sql-map cte-key]
-   (build-sql-cte resource-map sql-map "" {}))
-  ([resource-map sql-map cte-key paths]
-   (loop [resource-map resource-map
-          sql-map (build-sql-add-resource-sql resource-map sql-map cte-key paths)]
-     (if (-> resource-map (:references) (nil?))
-       {:sql-map sql-map :paths paths}
-       (recur (:references resource-map) sql-map)))))
-
-(defn build-sql
-  [resource-map]
-  (let [{:keys [paths sql-map]} (build-sql-cte resource-map)]
-    (println "built paths")
-    (clojure.pprint/pprint paths)
-    sql-map))
-
-(println "\n\n")
-(clojure.pprint/pprint
- (build-sql
-  {:resourceType "Account"
-   :references
-   {:profile
-    {:resourceType "Profile"}
-    :posts
-    {:resourceType "Post"
-     :reverse true
-     :collection true
-     :by [:author :id]}}}))
+;; (println "\n\n-------------------------------------------------------------------------------")
+;; (clojure.pprint/pprint
+;;  (resource->sql
+;;   {:resourceType "Account"
+;;    :references
+;;    {
+;;     :profile {:resourceType "Profile"}
+;;     ;; :posts
+;;     ;; {:resourceType "Post"
+;;     ;;  :by [:author :id]
+;;     ;;  :collection true
+;;     ;;  :reverse true
+;;     ;;  :references
+;;     ;;  {:commentaries
+;;     ;;   {:resourceType "Commentary"
+;;     ;;    :by [:post :id]
+;;     ;;    :collection true
+;;     ;;    :reverse true
+;;     ;;    :references {:author {:resourceType "Account"}}
+;;     ;;    }
+;;     ;;   }
+;;     ;;  }
+;;     }
+;;    }
+;;   #_{:str? true}))

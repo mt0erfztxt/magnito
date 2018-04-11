@@ -1,10 +1,28 @@
 # magnito
 
-A Clojure library designed to ... well, that part is up to you.
-
 ## Usage
 
-FIXME
+Write resource, feed it to `magnito.core/resource->sql` and get SQL string/vector back.
+
+## Demo
+In Shell
+```
+source .env
+docker-compose up -d
+lein repl
+```
+, then in REPL
+```
+(require '[magnito.demo :as demo])
+(demo/run)
+```
+
+## TODO
+* Add tests.
+* Make code lean and clean.
+* Allow multi-path resource trees.
+* Allow to use where in root resource.
+* Allow to specify field attributes that must be in result.
 
 ## License
 

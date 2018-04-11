@@ -1,31 +1,26 @@
 (ns magnito.core-test
   (:require
    [clojure.test :refer :all]
-   [honeysql.format :as honeysql-format]
+   [honeysql.core :as honeysql]
    [magnito.core :as magnito]))
 
-(def query
-  {:resourceType "User"
-   :references
-   {:profile
-    {:resourceType "Profile"
-     :elements [:name]}
-    #_:posts
-    #_{:resourceType "Post"
-       :reverse true
-       :collection true
-       :by [:author :id]
-       :elements [:title] ;; pick only required attributes
-       :references
-       {:comments
-        {:resourceType "Comment"
-         :by [:post :id]
-         :collection true
-         :reverse true
-         :references
-         {:author
-          {:resourceType "User"}}}}}}})
-
-(deftest build-sql-test
-  (testing "It builds SQL"
-    (is (= 0 1))))
+(deftest build-query-part-aggregate-collection-resource-test
+  (testing "It returns correct SQL"
+    (let [subj #'magnito/build-query-part-aggregate-collection-resource]
+      (let [result (subj [:root] :posts {:by [:author :id]})]
+        (is (map? result))
+        (is (= (honeysql/format result)
+               ["SELECT json_agg(t1.posts) AS posts FROM ? t1 GROUP BY jsonb_extract_path_text(t1.posts, ?, ?) HAVING jsonb_extract_path_text(t1.posts, ?, ?) IS NOT NULL"
+                "root_posts"
+                "'author'"
+                "'id'"
+                "'author'"
+                "'id'"])))
+      (let [result (subj {:select [:a] :from [:b]} :posts {:by [:author :id]})]
+        (is (map? result))
+        (is (= (honeysql/format result)
+               ["SELECT json_agg(t1.posts) AS posts FROM (SELECT a FROM b) t1 GROUP BY jsonb_extract_path_text(t1.posts, ?, ?) HAVING jsonb_extract_path_text(t1.posts, ?, ?) IS NOT NULL"
+                "'author'"
+                "'id'"
+                "'author'"
+                "'id'"]))))))
