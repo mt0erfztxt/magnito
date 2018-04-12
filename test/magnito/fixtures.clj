@@ -1,4 +1,4 @@
-(ns magnito.demo
+(ns magnito.fixtures
   (:require
    [cheshire.core :as json]
    [clojure.java.jdbc :as jdbc]
@@ -116,7 +116,7 @@
      :resource {:resourceType "Commentary" :id "commentary-6" :post {:id "post-2"} :text "Comment 6" :author {:id "account-2"}}}])
   nil)
 
-(defn- prepare-db!
+(defn prepare-db!
   [db-spec]
   (jdbc/with-db-transaction [t-con db-spec]
     (do
@@ -124,42 +124,7 @@
       (prepare-db!-truncate-tables t-con)
       (prepare-db!-insert-data t-con))))
 
-(defn run
-  []
+(defn wrap-setup
+  [f]
   (prepare-db! db-spec)
-  (let [resource
-        {:resourceType "Account"
-         :references
-         {:posts
-          {:resourceType "Post"
-           :by [:author :id]
-           :collection true
-           :reverse true
-           :references
-           {:commentaries
-            {:resourceType "Commentary"
-             :by [:post :id]
-             :collection true
-             :reverse true
-             :references
-             {:author
-              {:resourceType "Account"}}}}}}}
-        sql-str (magnito/resource->sql resource {:str? true})
-        sql-vec (magnito/resource->sql resource)]
-    (println "###############################################################################")
-    (println "#                                  Resource                                   #")
-    (println "###############################################################################")
-    (clojure.pprint/pprint resource)
-    (println "###############################################################################")
-    (println "#                                  SQL (vec)                                  #")
-    (println "###############################################################################")
-    (clojure.pprint/pprint sql-vec)
-    (println "###############################################################################")
-    (println "#                                  SQL (str)                                  #")
-    (println "###############################################################################")
-    (clojure.pprint/pprint sql-str)
-    (println "###############################################################################")
-    (println "#                                   Result                                    #")
-    (println "###############################################################################")
-    (clojure.pprint/pprint
-     (jdbc/query db-spec sql-vec))))
+  (f))
