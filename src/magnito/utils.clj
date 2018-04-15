@@ -34,7 +34,8 @@
                 (name)
                 (#(if acc (str acc "_" %) %))))
           nil)
-         (#(if % (str/lower-case %) %)))))
+         (#(when %
+             (->> % (str/lower-case) (str"_")))))))
 
 (defn cte-path->ref-key
   [path]
@@ -45,7 +46,7 @@
 (defn expand-cte-path
   [path segment]
   (when-not (and (nil? path) (nil? segment))
-    (-> (if (empty? path) [:root] path)
+    (-> (if (empty? path) [] path)
         (vec)
         (conj segment)
         (#(remove nil? %))
@@ -80,28 +81,55 @@
   [v]
   (cte-name->path v))
 
-(defn to-json-path-segment
+(defn to-sql-json-attr
   [v]
-  {:pre [(or (keyword? v) (string? v) (number? v))]}
+  (when-not (or (keyword? v)
+                (and (string? v) (re-matches #"\S+" v))
+                (number? v))
+    (throw
+     (IllegalArgumentException. "argument must be a keyword, non-blank string or number")))
   (let [v (if (keyword? v) (name v) v)]
     (-> v
         (#(str "'" % "'"))
         (keyword))))
 
-(defn build-sql-json-path-extractor-call
-  ([field resource-path] (build-sql-json-path-extractor-call field resource-path nil))
-  ([field resource-path table-alias]
-   {:pre [(or (keyword? field) (string? field))
-          (or (nil? resource-path) (vector? resource-path))
-          (or (nil? table-alias) (keyword? table-alias))]}
-   (let [field (if table-alias (honeysql/qualify table-alias field) field)
+(defn call-jsonb-agg-sql-func
+  [field]
+  (honeysql/call :jsonb_agg field))
+
+(defn call-jsonb-extract-path-text-sql-func
+  "* `:field` - keyword or string.
+   * `:path-segments` - keyword or string. `nil`s ignored."
+  ([field & path-segments]
+   {:pre [(or (keyword? field) (string? field))]}
+   (let [field (if (keyword? field) field (keyword field))
          parts
-         (->> resource-path
+         (->> path-segments
               (reduce
                (fn [acc item]
                  (if (nil? item)
                    acc
-                   (conj acc (to-json-path-segment item))))
+                   (conj acc (to-sql-json-attr item))))
                [])
               (into [:jsonb_extract_path_text field]))]
      (apply honeysql/call parts))))
+
+(defn call-jsonb-set-sql-func
+  "* `:path` - keyword or seq of keywords."
+  [t1-field path t2-field]
+  (let [path-str
+        (->> path
+             (as-vector)
+             (map name)
+             (str/join ",")
+             (#(str "'{" % "}'"))
+             (keyword))]
+    (honeysql/call :jsonb_set t1-field path-str t2-field)))
+
+(defn unqualify-field
+  [v]
+  {:pre [(or (keyword? v) (string? v))]}
+  (let [[table-alias field] (-> v (name) (str/split #"\."))]
+    (-> field
+        (or table-alias)
+        (keyword))))
