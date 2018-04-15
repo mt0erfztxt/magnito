@@ -49,7 +49,7 @@ Resource is a map that must/may have following key-value pairs (in no particular
 * `:resourceType` - required, string. Specifies name of DB table that holds entities of interest.
 * `:references` - optional, map. Each key of map is a keyword that specifies attribute under which referenced entity would be attached to parent and value is a resource map.
 * `:collection` - optional, boolean, default to `false`. When evaluates to logical true then specified resource is a collection. Collection resources may not have `:reverse` key-value pair set to logical false. Ignored for root resource.
-* `:reverse` - optional, boolean, default to `false`. When evaluates to logical true then resource referenced parent resource itself, otherwise parent resource have reference to referenced resource in form. For example, for resource
+* `:reverse` - optional, boolean, default to `false`. When evaluates to logical true then resource points to parent resource itself, otherwise parent resource have reference to referenced resource. Ignored for root resource. For example, for resource
 ```clj
 {:resourceType "Accout"
  :references
@@ -64,20 +64,23 @@ otherwise JSON for `Profile` must have corresponding attribute
 {"account": {"id": "account-1"}}
 ```
 * `:id` - optional, keyword, `:id` by default. Allows to specify id attribute used in JSON.
-* `:by` - optional, seq of keywords. Ignored for root resource. When not set would be a 2-elements vector of keywordized parent resource's type and id when `:reverse` evaluates to logical true or 2-elements vector of referenced resource's key and id when `:reverse` evaluates to logical false. For example, when `:reverse` is true
+* `:by` - optional, seq of keywords. Ignored for root resource. When not set would be a 2-elements vector of keywordized parent resource's type and id when `:reverse` evaluates to logical true or 2-elements vector of referenced resource's key and id when `:reverse` evaluates to logical false. For example
 ```clj
 {:resourceType "Accout"
  :references
- {:resourceType "Profile"
-  :reverse false   ; Means that Account JSON have {"profile": {"id": "profile-1"}}.
-  }}
+ {:profile
+  {:resourceType "Profile"
+   :reverse false   ; Means that Account JSON have {"profile": {"id": "profile-1"}} to point to Profile JSON.
+   ;; by [:info :id]   ; Means that Account JSON have {"info": {"id": "profile-1"}} to point to Profile JSON.
+   }}}
 
 {:resourceType "Accout"
  :references
- {:resourceType "Profile"
-  :reverse true   ; Means that Profile JSON have {"account": {"id": "account-1"}} to point to Account JSON.
-  ;; by [:user :id]   ; Means that Profile JSON have {"user": {"id": "account-1"}} to point to Account JSON.
-  }}
+ {:profile
+  {:resourceType "Profile"
+   :reverse true   ; Means that Profile JSON have {"account": {"id": "account-1"}} to point to Account JSON.
+   ;; by [:user :id]   ; Means that Profile JSON have {"user": {"id": "account-1"}} to point to Account JSON.
+   }}}
 ```
 
 ## Development
