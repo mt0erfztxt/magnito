@@ -1,5 +1,6 @@
 # magnito
 A small DSL that generates SQL query to eagerly load entities, with any level of nesting, from DB.
+**NOTE:** Currently supports only JSONB-based setup (PostgreSQL).
 
 ## Usage
 Write [resource](https://github.com/mt0erfztxt/magnito#resource-description), pass it to `magnito.core/resource->sql` and get SQL string/vector back.
@@ -79,6 +80,25 @@ otherwise JSON for `Profile` must have corresponding attribute
   }}
 ```
 
+## Development
+In shell (must support `export`, see `.env` file in project root for details)
+```
+source .env
+docker-compose up -d
+lein repl
+```
+
+## Testing
+In shell (must support `export`, see `.env` file in project root for details)
+```
+source .env
+docker-compose up -d
+lein test
+```
+
+## Credits
+Original idea of DSL by [niquola](https://github.com/niquola).
+
 ## TODO
 * Document code.
 * Simplify and clean code.
@@ -86,11 +106,11 @@ otherwise JSON for `Profile` must have corresponding attribute
 * Allow to specify subset of entity attributes that must be in result - currently JSONB field content returned as-is.
 * Allow to use LIMIT in resources.
 * Allow to specify name of JSONB field - currently `resource` is used everywhere.
-* Check whether idea can be expanded to 'traditional' (non JSONB-based) entities.
+* Check whether idea can be expanded to 'traditional' (non JSONB-based) entities or not.
 
 ## License
 
-Copyright © 2018 FIXME
+Copyright © 2018 mt0erfztxt
 
 Distributed under the Eclipse Public License either version 1.0 or (at
 your option) any later version.
