@@ -53,7 +53,8 @@ Resource is a map that must/may have following key-value pairs (in no particular
 ```clj
 {:resourceType "Accout"
  :references
- {:resourceType "Profile" :reverse false}}
+ {:profile
+  {:resourceType "Profile" :reverse false}}}
 ```
 JSON for `Account` must have corresponding attribute
 ```json
