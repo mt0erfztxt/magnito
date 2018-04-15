@@ -144,8 +144,8 @@
              :references
              {:author
               {:resourceType "Account"}}}}}}}
-        sql-str (magnito/resource->sql resource {:str? true})
-        sql-vec (magnito/resource->sql resource)]
+        sql-str (magnito/resource->sql resource {:str? true :separate? false})
+        sql-vec (magnito/resource->sql resource {:str? true :separate? false})]
     (println "###############################################################################")
     (println "#                                  Resource                                   #")
     (println "###############################################################################")
