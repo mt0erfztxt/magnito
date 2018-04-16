@@ -1,0 +1,25 @@
+language: clojure
+
+env:
+  global:
+    - PGPORT=5433
+
+addons:
+  postgresql: "10"
+  apt:
+    packages:
+      - postgresql-10
+      - postgresql-client-10
+
+services:
+  - postgresql
+
+jdk:
+  - oraclejdk8
+
+before_script:
+  - sudo -u postgres createuser -s -p 5433 magnito
+  - sudo -u postgres createdb -O magnito -p 5433 magnito
+  - sudo -u postgres psql -p 5433 -c "ALTER USER magnito WITH PASSWORD 'magnito';"
+
+script: env DATABASE_URL="jdbc:postgresql://localhost:5433/magnito?user=magnito&password=magnito" lein test
