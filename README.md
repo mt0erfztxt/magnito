@@ -1,4 +1,4 @@
-# magnito
+# magnito [![Build Status](https://travis-ci.org/mt0erfztxt/magnito.svg?branch=master)](https://travis-ci.org/mt0erfztxt/magnito)
 A small DSL that generates SQL query to eagerly load entities, with any level of nesting, from DB.
 **NOTE:** Currently supports only JSONB-based setup (PostgreSQL).
 
