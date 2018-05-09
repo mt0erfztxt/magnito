@@ -5,6 +5,95 @@ A small DSL that generates SQL query to eagerly load entities, with any level of
 ## Usage
 Write [resource](https://github.com/mt0erfztxt/magnito#resource-description), pass it to `magnito.core/resource->sql` and get SQL string/vector back.
 
+## Sample
+Input
+```clj
+(def resource
+  {:resourceType "Account"
+   :references
+   {:profile {:resourceType "Profile"}
+    :posts
+    {:resourceType "Post"
+     :by [:author :id]
+     :collection true
+     :reverse true
+     :references
+     {:commentaries
+      {:resourceType "Commentary"
+       :by [:post :id]
+       :collection true
+       :reverse true
+       :references
+       {:author
+        {:resourceType "Account"}}}}}}})
+```
+
+Output as string
+```sql
+WITH _account AS
+(
+  SELECT t1.resource AS account FROM Account t1
+),
+_account_profile AS
+(
+  SELECT t2.resource AS profile
+  FROM _account t1
+    LEFT JOIN Profile t2 ON jsonb_extract_path_text (t1.account,'profile','id') = jsonb_extract_path_text (t2.resource,'id')
+),
+_account_posts AS
+(
+  SELECT t2.resource AS posts
+  FROM _account t1
+    LEFT JOIN Post t2 ON jsonb_extract_path_text (t1.account,'id') = jsonb_extract_path_text (t2.resource,'author','id')
+),
+_account_posts_commentaries AS
+(
+  SELECT t2.resource AS commentaries
+  FROM _account_posts t1
+    LEFT JOIN Commentary t2 ON jsonb_extract_path_text (t1.posts,'id') = jsonb_extract_path_text (t2.resource,'post','id')
+),
+_account_posts_commentaries_author AS
+(
+  SELECT t2.resource AS author
+  FROM _account_posts_commentaries t1
+    LEFT JOIN Account t2 ON jsonb_extract_path_text (t1.commentaries,'author','id') = jsonb_extract_path_text (t2.resource,'id')
+)
+SELECT JSONB_AGG(t1.account) AS result
+FROM (SELECT CASE
+               WHEN t2.posts IS NULL THEN t1.account
+               ELSE JSONB_SET(t1.account,'{posts}',t2.posts)
+             END AS account
+      FROM (SELECT CASE
+                     WHEN t2.profile IS NULL THEN t1.account
+                     ELSE JSONB_SET(t1.account,'{profile}',t2.profile)
+                   END AS account
+            FROM _account t1
+              LEFT JOIN _account_profile t2 ON jsonb_extract_path_text (t1.account,'profile','id') = jsonb_extract_path_text (t2.profile,'id')) t1
+        LEFT JOIN (SELECT JSONB_AGG(t1.posts) AS posts
+                   FROM (SELECT DISTINCT t1.posts AS posts,
+                                jsonb_extract_path_text(t1.posts,'id')
+                         FROM (SELECT CASE
+                                        WHEN t2.commentaries IS NULL THEN t1.posts
+                                        ELSE JSONB_SET(t1.posts,'{commentaries}',t2.commentaries)
+                                      END AS posts
+                               FROM _account_posts t1
+                                 LEFT JOIN (SELECT JSONB_AGG(t1.commentaries) AS commentaries
+                                            FROM (SELECT DISTINCT t1.commentaries AS commentaries,
+                                                         jsonb_extract_path_text(t1.commentaries,'id')
+                                                  FROM (SELECT CASE
+                                                                 WHEN t2.author IS NULL THEN t1.commentaries
+                                                                 ELSE JSONB_SET(t1.commentaries,'{author}',t2.author)
+                                                               END AS commentaries
+                                                        FROM _account_posts_commentaries t1
+                                                          LEFT JOIN _account_posts_commentaries_author t2 ON jsonb_extract_path_text (t1.commentaries,'author','id') = jsonb_extract_path_text (t2.author,'id')) t1
+                                                  ORDER BY jsonb_extract_path_text(t1.commentaries,'id')) t1
+                                            GROUP BY jsonb_extract_path_text(t1.commentaries,'post','id')
+                                            HAVING jsonb_extract_path_text (t1.commentaries,'post','id') IS NOT NULL) t2 ON jsonb_extract_path_text (t1.posts,'id') = jsonb_extract_path_text (t2.commentaries,'0','post','id')) t1
+                         ORDER BY jsonb_extract_path_text(t1.posts,'id')) t1
+                   GROUP BY jsonb_extract_path_text(t1.posts,'author','id')
+                   HAVING jsonb_extract_path_text (t1.posts,'author','id') IS NOT NULL) t2 ON jsonb_extract_path_text (t1.account,'id') = jsonb_extract_path_text (t2.posts,'0','author','id')) t1
+```
+
 ## Demo
 In shell (must support `export`, see `.env` file in project root for details)
 ```
